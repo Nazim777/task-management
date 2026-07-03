@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and fill in values
+# Never commit terraform.tfvars
+
+aws_region     = "us-east-1"
+db_user        = ""
+db_pass        = ""
+db_name        = "taskdb"
+duckdns_token  = ""
+duckdns_domain = "task-mng"
+backend_image  = ""
+frontend_image = ""

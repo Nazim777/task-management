@@ -3,8 +3,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { CacheModule } from '@nestjs/cache-manager';
 import { TasksModule } from './tasks/tasks.module';
 import { Task } from './tasks/task.entity';
+import { HealthController } from './health.controller';
 
 @Module({
+  controllers: [HealthController],
   imports: [
     TypeOrmModule.forRoot({
       type: 'postgres',

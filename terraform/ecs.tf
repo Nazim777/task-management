@@ -154,7 +154,7 @@ resource "aws_ecs_service" "backend" {
     container_port   = 3000
   }
 
-  depends_on = [aws_lb_listener.https]
+  depends_on = [aws_lb_listener.http]
 }
 
 # Frontend ECS Service
@@ -176,5 +176,5 @@ resource "aws_ecs_service" "frontend" {
     container_port   = 3001
   }
 
-  depends_on = [aws_lb_listener.https]
+  depends_on = [aws_lb_listener.http]
 }

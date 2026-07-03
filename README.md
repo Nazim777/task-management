@@ -2,6 +2,8 @@
 
 Full-stack task management app deployed on AWS with ECS Fargate, RDS, ElastiCache, ALB, and CI/CD via GitHub Actions.
 
+---
+
 ## Stack
 
 | Layer | Technology |
@@ -12,7 +14,7 @@ Full-stack task management app deployed on AWS with ECS Fargate, RDS, ElastiCach
 | Cache | Redis (AWS ElastiCache) |
 | Container Registry | AWS ECR |
 | Orchestration | AWS ECS Fargate |
-| Load Balancer | AWS ALB + ACM SSL |
+| Load Balancer | AWS ALB |
 | DNS | DuckDNS + Lambda IP updater |
 | Infrastructure | Terraform |
 | CI/CD | GitHub Actions |
@@ -22,23 +24,76 @@ Full-stack task management app deployed on AWS with ECS Fargate, RDS, ElastiCach
 ## Architecture
 
 ```
-Browser
-   │
-   ▼
-https://task-mng.duckdns.org
-   │
-   ▼
-AWS ALB (port 443 — SSL terminated here)
-   │
-   ├── /api/*  ──► ECS Fargate (NestJS backend x2)
-   │                    │
-   │                    ├── RDS PostgreSQL
-   │                    └── ElastiCache Redis
-   │
-   └── /*      ──► ECS Fargate (Next.js frontend x2)
-
-Lambda (every 5 min) ──► resolves ALB IP ──► updates DuckDNS
+User types: http://task-mng.duckdns.org
+                    │
+                    ▼
+         DuckDNS resolves → ALB IP
+         (Lambda keeps this updated every 5 min)
+                    │
+                    ▼
+              ALB port 80
+                    │
+         ┌──────────┴──────────┐
+         │                     │
+      /api/*                  /*
+         │                     │
+         ▼                     ▼
+   ECS Backend           ECS Frontend
+   (NestJS x2)           (Next.js x2)
+         │
+    ┌────┴────┐
+    ▼         ▼
+   RDS     ElastiCache
+ (store)   (cache)
 ```
+
+---
+
+## AWS Services Explained
+
+### VPC
+Your own private network inside AWS. Public subnets hold the ALB. Private subnets hold ECS, RDS, and Redis — never exposed to the internet.
+
+### Internet Gateway
+The main gate of your VPC. Allows traffic between your VPC and the internet.
+
+### NAT Gateway
+Allows private subnet containers to reach the internet (pull Docker images, etc.) without being reachable from outside.
+
+### Security Groups
+Firewall rules per service:
+- **ALB** → accepts port 80 from everyone
+- **ECS** → accepts traffic only from ALB
+- **RDS** → accepts port 5432 only from ECS
+- **Redis** → accepts port 6379 only from ECS
+
+### ECR (Elastic Container Registry)
+AWS private Docker registry. Stores backend and frontend images. GitHub Actions builds and pushes here, ECS pulls from here.
+
+### RDS (PostgreSQL)
+Managed database. AWS handles backups, patches, and hardware. All tasks stored here permanently in a private subnet.
+
+### ElastiCache (Redis)
+Managed Redis cache. Caches `GET /api/tasks` for 60 seconds. Cache is busted on every create, update, or delete. Reduces RDS load significantly.
+
+### ALB (Application Load Balancer)
+Single entry point. Routes `/api/*` to the backend and `/*` to the frontend. Runs health checks on every container and removes unhealthy ones automatically.
+
+### ECS Fargate
+Runs Docker containers without managing servers. Two services run 2 replicas each. If a container crashes, ECS automatically replaces it.
+
+### Lambda (DuckDNS Updater)
+Runs every 5 minutes. Resolves the ALB DNS name to its current IP and updates DuckDNS so `task-mng.duckdns.org` always points to the ALB.
+
+### CloudWatch
+Collects logs from all containers. Log groups: `/ecs/task-management/backend` and `/ecs/task-management/frontend`. Retention: 7 days.
+
+### S3 (Terraform State)
+Stores Terraform's memory of what infrastructure exists. Without it Terraform can't update or destroy resources correctly.
+
+### IAM Roles
+- **ECS Task Execution Role** → allows ECS to pull from ECR and write to CloudWatch
+- **Lambda Role** → allows Lambda to write logs to CloudWatch
 
 ---
 
@@ -55,7 +110,7 @@ task-management-aws/
 │   ├── rds.tf                  ← PostgreSQL on RDS
 │   ├── elasticache.tf          ← Redis on ElastiCache
 │   ├── ecr.tf                  ← Docker image registries
-│   ├── alb.tf                  ← Load balancer + ACM SSL
+│   ├── alb.tf                  ← Load balancer + health checks
 │   ├── ecs.tf                  ← Fargate services
 │   ├── lambda.tf               ← DuckDNS IP updater
 │   ├── outputs.tf              ← ALB URL, ECR URLs etc
@@ -112,21 +167,7 @@ git push origin main
 ### 5. CI/CD Pipeline runs
 
 ```
-Test → Build images → Push to ECR → Terraform apply → Live
-```
-
----
-
-## What You Get
-
-```
-https://task-mng.duckdns.org   ← your app, HTTPS, auto-renewing
-                                ← ALB routes /api/* to backend
-                                ← Lambda keeps DuckDNS IP updated
-                                ← RDS stores data persistently
-                                ← ElastiCache caches API responses
-                                ← ECS Fargate runs 2 replicas each
-                                ← CloudWatch logs everything
+Test → Bootstrap ECR → Build images → Push to ECR → Terraform apply → Live
 ```
 
 ---
@@ -153,7 +194,7 @@ After `terraform apply` you get:
 | `frontend_ecr_url` | ECR URL for frontend image |
 | `rds_endpoint` | RDS PostgreSQL endpoint |
 | `redis_endpoint` | ElastiCache Redis endpoint |
-| `app_url` | https://task-mng.duckdns.org |
+| `app_url` | http://task-mng.duckdns.org |
 
 ---
 
@@ -161,27 +202,31 @@ After `terraform apply` you get:
 
 | Service | Instance | Cost/mo |
 |---|---|---|
-| ECS Fargate (backend x2) | 0.25 vCPU / 512MB | ~$8 |
+| ECS Fargate (backend x2) | 0.5 vCPU / 1GB | ~$16 |
 | ECS Fargate (frontend x2) | 0.25 vCPU / 512MB | ~$8 |
 | RDS PostgreSQL | db.t3.micro | ~$15 |
 | ElastiCache Redis | cache.t3.micro | ~$12 |
 | ALB | — | ~$16 |
+| NAT Gateway | — | ~$32 |
 | Lambda | free tier | ~$0 |
 | ECR | free tier | ~$0 |
-| **Total** | | **~$59/mo** |
+| **Total** | | **~$99/mo** |
 
 ---
 
 ## Secrets Management
 
-- Local dev: `.env` file (never committed)
-- CI/CD: GitHub Secrets
-- Runtime: AWS Secrets Manager (DB credentials)
-- Never hardcoded anywhere in code or Terraform
+| Where | How |
+|---|---|
+| Local dev | `.env` file (never committed) |
+| CI/CD | GitHub Secrets |
+| Runtime | Environment variables via ECS task definition |
 
 ---
 
 ## Destroying Infrastructure
+
+### Option 1 — Terraform (recommended)
 
 ```bash
 cd terraform
@@ -192,3 +237,30 @@ terraform destroy \
   -var="backend_image=placeholder" \
   -var="frontend_image=placeholder"
 ```
+
+Type `yes` when prompted.
+
+### Option 2 — AWS Console (delete in this order)
+
+```
+1. ECS         → delete backend + frontend services → delete cluster
+2. ALB         → delete task-management-alb
+3. RDS         → delete task-management-postgres (skip final snapshot)
+4. ElastiCache → delete task-management-redis
+5. ECR         → delete both repositories
+6. Lambda      → delete task-management-duckdns-updater
+7. VPC         → delete task-management VPC
+8. EC2         → Elastic IPs → release NAT gateway EIP
+9. CloudWatch  → delete /ecs/task-management/* log groups
+10. S3         → empty and delete task-management-tf-state
+```
+
+### Delete These First to Stop Costs Immediately
+
+| Service | Cost/hr | Action |
+|---|---|---|
+| NAT Gateway | $0.045 | Delete first |
+| ALB | $0.022 | Delete second |
+| RDS | $0.017 | Delete third |
+| ElastiCache | $0.017 | Delete fourth |
+| ECS Fargate | $0.016 | Stops when service deleted |

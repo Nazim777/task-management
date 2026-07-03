@@ -17,6 +17,9 @@ import { HealthController } from './health.controller';
       database: process.env.DB_NAME ?? 'taskdb',
       entities: [Task],
       synchronize: true,
+      ssl: process.env.DB_HOST !== 'localhost' && process.env.DB_HOST !== 'postgres'
+        ? { rejectUnauthorized: false }
+        : false,
     }),
     CacheModule.register({
       isGlobal: true,
